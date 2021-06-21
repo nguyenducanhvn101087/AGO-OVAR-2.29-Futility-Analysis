@@ -1,0 +1,357 @@
+---
+title: "AGO_Ovar229_MO39212_Fut_Anal"
+author: "Anh Nguyen Duc"
+date: "`r Sys.Date()`"
+# output: word_document
+
+output:
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: true
+    to_depth: 5
+    collapsed: false
+    smooth_scroll: false
+    number_sections: true
+    theme: united
+  word_document: default
+header-includes: \usepackage{docmute}
+classoption: landscape
+---
+
+```{r,echo=F,message=F,warning=F}
+rm(list=ls())
+# source('ADA5W_OPTIMAL_MATCHING_12SEP2018_29522.R')
+# source('ADA5W_TOLERANCE_MATCHING_12SEP2018_29522.R')
+require(knitr)
+require(haven)
+require(magrittr)
+require(gmodels)
+require(tidyverse)
+require(ldbounds)
+require(gsDesign)
+require(msm)
+require(xlsx)
+require(rpact)
+require(survival)
+require(survminer)
+require(mvtnorm)
+# source("../../../../../../../../Methods/R/survivalSampleSizeMisc.R")
+# source('../../../../../../../../Methods/Surv/Non_PH/NPH.R')
+knitr::opts_chunk$set(echo = TRUE, cache=FALSE, autodep=FALSE)
+# source("https://raw.github.roche.com/adaptR/adaptR-tutorials/master/simpleBoundarySummary.R")
+set.seed(21)
+```
+
+## Supportive techinical resource
+
++ https://pages.github.roche.com/successR/successR/index.html
+
++ https://cran.r-project.org/web/packages/bpp/index.html
+
++ https://onlinelibrary.wiley.com/doi/full/10.1002/pst.1764 
+
++ https://www.tandfonline.com/doi/full/10.1080/10543406.2014.972508 
+
++ https://www.sciencedirect.com/science/article/pii/0197245686900048 
+
+## Plan
+
+
++ Consider various futility thresholds on the scale of conditional probability (function post_power in bpp package) for both PFS and OS
+
+    + Using the formula in Lema A.1. of https://www.tandfonline.com/doi/full/10.1080/10543406.2014.972508, 
+    
+    + whereby $\theta$ is always assumed to be the log hazard ratio in the power calculation.
+
++ Consider various pairs of ``true'' underlying HR for OS and PFS.
+
++ Consider various number of OS events (also calculate the associated expected months from FPI to reaching target OS event number).
+
++ Go through each of these combinations / scenarios and calculate
+
+    + Probability of GO decision (false / true contingent on the underlying pairs of OS/PFS HR). 
+    
+    + Probability of GO decision & with positive read-out (a subset of the above).
+    
+    + Expected read-out time (under the current pairs of ``true'' OS/PFS HR).
+    
+    + To avoid simulation one can first consider again the formula from Lemma A.1. of https://www.tandfonline.com/doi/full/10.1080/10543406.2014.972508, where by
+    
+        + For both OS and PFS, let $d_{fin}$ be the event number at the final / primary analysis, $d_{int}$ be the event number at the futility analysis, $\theta_{suc}$ be the efficacy boundary on the log hazard ratio scale at the final / primary analysis, $\theta_{int}$ be the observed log HR at the futility analysis and $d_2=d_{fin}-d_{int}$. Finally let $\theta$ be the assumed log HR that the events accumulated after the futility analysis will follow, which is always considered to be the log HR used in power calculation. Further more let $\gamma$ be the futility boundary on the conditional power scale.
+        
+        + Given these notations and Lemma A.1. formula we have: 
+        $$
+        \begin{align*}
+                        & CP_{\theta}\ge\gamma\\
+        \Leftrightarrow & \theta_{int}\le d_{int}^{-1}\left(d_{fin}\theta_{suc}-2\sqrt{d_{fin}}\Phi^{-1}\left(\gamma\right)-d_2\theta\right) 
+        \end{align*}
+        $$
+        
+        + For each of the true underlying log HR $\theta_0$ we have 
+        
+        $$
+        \left(
+        \begin{array}{c}
+        \theta_{int} \\
+        \theta_{fin}
+        \end{array}
+        \right)
+        \sim\mathcal{N}
+        \left(
+        \left(        
+        \begin{array}{c}
+        \theta_0 \\
+        \theta_0 
+        \end{array}
+        \right),\     
+        \left(        
+        \begin{array}{cc}        
+        \frac{4}{d_{int}} & \frac{4}{d_{fin}}\\ 
+        \frac{4}{d_{fin}} & \frac{4}{d_{fin}}
+        \end{array}
+        \right)        
+        \right)        
+        $$
+        
+        + With this one could then calculate the following quantities
+        
+            + $P_{\theta_0}\left(CP_{\theta}\ge\gamma\right)$
+            
+            + $P_{\theta_0}\left(CP_{\theta}\ge\gamma\bigcap\theta_{fin}\le\theta_{suc}\right)$
+            
+            + $P_{\theta_0}\left(\theta_{fin}\le\theta_{suc}\mid CP_{\theta}\ge\gamma\right)$
+            
+        <!-- + One can further assume independence between PFS and OS, which is likely to be assumed even via simulation, to calculate the probability of having at least one or both positive outcomes. -->
+    
++ Caveat of current proposal and possible extensions
+
+    + In the simulation we ignore the intrinsic correlation between PFS and OS as well as the potential to recycle $\alpha$ between the endpoints.
+    
+    + The use of predicive probability would be mentioned as a potential modification with the caveat concerning the difficulty in choosing a prior.
+    
+    + An efficacy stopping boundary could also be added.
+
+```{r,echo=T,message=F,warning=F}
+## Trial setup -----------------------------
+fpi <- as.Date('2018-08-01') 
+
+mOS_ctr <- 15
+alp_OS  <- .045 # two-sided
+pow_OS  <- 0.8
+
+mPFS_ctr<- 6.5
+alp_PFS <- .005 # two-sided
+pow_PFS <- 0.92
+
+final_OS_ev <- 391
+final_PFS_ev<- 547
+
+rr <- 1 # Pla : Atz
+
+# below data is from file MO39212_Amd1_20210119_V4_0_CI_PST_revRocheLegal_BWJlegal_20210301_20210304_ba_revNC_PST_revNC.doc / Attachment 8 (p22)
+tmp_accrualIntensity <-  c(0, 100, 266, 332, 399, 465, 531, 598, 664) %>% diff
+tmp_accrualTime <- (((as.Date(c('2018-08-01', '2020-05-01', '2021-04-01', '2021-07-01',
+                         '2021-08-01', '2021-10-01', '2021-12-01', '2022-02-01', 
+                         '2022-03-01')) - fpi) %>% as.numeric)/30.4375) %>% round
+tmp_accrualTime_diff <- tmp_accrualTime %>% diff
+
+accrualIntensity <- accrualTime <- NULL
+accrualTime <- 0
+
+for(id in 1:length(tmp_accrualIntensity)) {
+  accrualIntensity <- c(accrualIntensity, 
+                        rep(tmp_accrualIntensity[id]/tmp_accrualTime_diff[id], times=tmp_accrualTime_diff[id]) )
+  accrualTime <- c(accrualTime, (tmp_accrualTime[id]+1):tmp_accrualTime[id+1])
+  
+} # end of for(id in 1:length(tmp_accrualIntensity))
+
+drop_out_time <- 9 # this would generally only affect timeline
+
+## Simulation / Calculation setup -----------------------------
+
+# true underlying HRs
+hrOS  <- c(0.75, 0.8, .95)
+hrPFS <- c(0.70, 0.8, .95)
+
+# number of OS events at which the futility analyis is to take place
+futi_OS_ev <- c(175, 200, 225, 250)
+
+# futility threshold on (currently) conditional probability scale
+futi_threshold <- c(0.2, .25, 0.3, 0.35, .4) 
+
+settings <- expand.grid('hrOS'=hrOS, 'hrPFS'=hrPFS, 'futi_OS_ev'=futi_OS_ev,
+                        'futi_threshold'=futi_threshold)
+settings <- settings[order(settings$hrOS, settings$hrPFS, settings$futi_OS_ev, settings$futi_threshold),]
+
+deg_OS <- getDesignGroupSequential(kMax=1, alpha=alp_OS/2,  sided = 1, beta=1-pow_OS)
+
+sam_OS <- deg_OS %>% getSampleSizeSurvival(median2 = mOS_ctr, hazardRatio = 0.75, allocationRatioPlanned = rr, accrualTime = accrualTime, accrualIntensity = accrualIntensity, dropoutRate1 = .05, dropoutRate2 = .05, dropoutTime = drop_out_time)
+
+sam_OS %>% summary
+
+deg_PFS<- getDesignGroupSequential(kMax=1, alpha=alp_PFS/2, sided = 1, beta=1-pow_PFS)
+
+sam_PFS<- deg_PFS %>% getSampleSizeSurvival(median2 = mPFS_ctr, hazardRatio = 0.70, allocationRatioPlanned = rr, accrualTime = accrualTime, accrualIntensity = accrualIntensity, dropoutRate1 = .05, dropoutRate2 = .05, dropoutTime = drop_out_time)
+
+theta_suc_OS <- sam_OS$criticalValuesEffectScale %>% as.numeric %>% log
+theta_suc_PFS<- sam_PFS$criticalValuesEffectScale %>% as.numeric %>% log
+
+set.seed(21)
+out <- NULL
+
+for (id in 1:nrow(settings)) {
+  
+  # get expected number of PFS events at each of the above OS events 
+  tmp <- deg_OS %>% getPowerSurvival(median2 = mOS_ctr, hazardRatio = settings$hrOS[id], allocationRatioPlanned = rr, accrualTime = accrualTime, accrualIntensity = accrualIntensity, dropoutRate1 = .05, dropoutRate2 = .05, dropoutTime = drop_out_time, maxNumberOfSubjects = accrualIntensity %>% sum, maxNumberOfEvents = settings$futi_OS_ev[id])
+  
+  time_to_OS<- tmp$analysisTime %>% ceiling
+  
+  OS_calen  <- (fpi + time_to_OS * 30.4375) %>% format("%Y-%b") %>% as.character
+  
+  event_PFS <- (getEventProbabilities(time = time_to_OS %>% as.numeric, 
+                                     accrualTime = accrualTime, accrualIntensity = accrualIntensity,
+                                     lambda2 = log(2)/mPFS_ctr, 
+                                     hazardRatio = settings$hrPFS[id], allocationRatioPlanned = rr,
+                                     dropoutRate1 = .05, dropoutRate2 = .05, dropoutTime = 12)$overallEventProbabilities * sum(accrualIntensity) )%>% ceiling  
+  
+  d2_OS <- final_OS_ev  - settings$futi_OS_ev[id]
+  d2_PFS<- final_PFS_ev - event_PFS
+  
+  tmp_OS <- (1/settings$futi_OS_ev[id]) * (final_OS_ev * theta_suc_OS - 
+                                           2*sqrt(final_OS_ev)*qnorm(settings$futi_threshold[id])-
+                                           d2_OS*0.75%>%log)
+  
+  tmp_PFS <- (1/event_PFS) * (final_PFS_ev * theta_suc_PFS - 
+                                           2*sqrt(final_PFS_ev)*qnorm(settings$futi_threshold[id])-
+                                           d2_PFS*0.70%>%log)  
+  
+  prob_cp_ge_futi_threshold_OS <- pnorm(q = tmp_OS, mean = settings$hrOS[id]%>%log, 
+                                        sd = 2/sqrt(settings$futi_OS_ev[id]), lower.tail = T)
+  
+  prob_cp_ge_futi_threshold_PFS<- pnorm(q = tmp_PFS, mean = settings$hrPFS[id]%>%log, 
+                                        sd = 2/sqrt(event_PFS), lower.tail = T)  
+  
+  
+  prob_cp_ge_futi_threshold_OS_and_pos_OS <- pmvnorm(lower=c(-Inf, -Inf), 
+                                                     upper=c(tmp_OS, theta_suc_OS), 
+                                                     mean =rep(settings$hrOS[id]%>%log, 2),
+                                                     sigma=rbind(
+                                                       c(4/settings$futi_OS_ev[id], 4/final_OS_ev),
+                                                       c(4/final_OS_ev,             4/final_OS_ev)
+                                                       )
+                                                     )
+  
+  prob_cp_ge_futi_threshold_PFS_and_pos_PFS <- pmvnorm(lower=c(-Inf, -Inf), 
+                                                       upper=c(tmp_PFS, theta_suc_PFS), 
+                                                       mean =rep(settings$hrPFS[id]%>%log, 2),
+                                                       sigma=rbind(
+                                                       c(4/event_PFS,    4/final_PFS_ev),
+                                                       c(4/final_PFS_ev, 4/final_PFS_ev)
+                                                       )
+                                                    )  
+  
+  out <- rbind(out, 
+               c('OS_time'=time_to_OS, 'OS_date'=OS_calen, 'PFS_ev'= event_PFS,
+                 'P_go_OS'=prob_cp_ge_futi_threshold_OS %>% round(digits=2),
+                 'P_go_pos_OS'=prob_cp_ge_futi_threshold_OS_and_pos_OS %>% round(digits=2),
+                 'P_pos_OS_cond_go_OS'=(prob_cp_ge_futi_threshold_OS_and_pos_OS/
+                                       prob_cp_ge_futi_threshold_OS) %>% round(digits=2),
+                 'P_go_PFS'=prob_cp_ge_futi_threshold_PFS %>% round(digits=2),
+                 'P_go_pos_PFS'=prob_cp_ge_futi_threshold_PFS_and_pos_PFS %>% round(digits=2),
+                 'P_pos_PFS_cond_go_PFS'=(prob_cp_ge_futi_threshold_PFS_and_pos_PFS/
+                                       prob_cp_ge_futi_threshold_PFS) %>% round(digits=2)           
+                 ))
+  
+} # end of for (id in 1:nrow(settings))
+```
+
+```{r,echo=T,message=F,warning=F,results='asis'}
+cbind(settings, out) %>% kable(digits=2) %>% print
+out <- out %>% as.data.frame
+library(lattice)
+
+for (hr_os in hrOS) {
+  
+  for (hr_pfs in hrPFS) {  
+    tmp_settings <- settings[which(settings$hrOS==hr_os & settings$hrPFS==hr_pfs),]
+    tmp_out      <- out[which(settings$hrOS==hr_os & settings$hrPFS==hr_pfs),]
+    tmp <- cbind(tmp_settings, tmp_out)
+    
+    #par(mfrow=c(4,1))    
+    
+    with(tmp, {
+      bp<-barplot(height = futi_OS_ev %>% unique, names.arg = OS_date %>% unique,  col='lightgray', 
+                  ylab = 'OS events', main=paste0('True HR OS = ', hr_os, ', HR PFS = ', hr_pfs))
+      text(x=bp, y = futi_OS_ev%>%unique/2, labels = futi_OS_ev%>%unique)
+      
+      bp<-barplot(height = PFS_ev %>% unique %>% as.character %>% as.numeric, 
+                  names.arg = OS_date %>% unique,  col='green', ylab = 'PFS events',
+                  main=paste0('True HR OS = ', hr_os, ', HR PFS = ', hr_pfs))
+      text(x=bp, y = (PFS_ev%>%unique%>%as.character %>% as.numeric)/2, 
+           labels = PFS_ev%>%unique%>%as.character %>% as.numeric)      
+      
+      })
+      
+    barchart(I(P_go_OS %>% as.character %>% as.numeric)~I(futi_OS_ev%>%as.factor), data=tmp, groups=futi_threshold, 
+             scales=list(x=list(rot=45,cex=0.8)), auto.key=T, 
+             xlab='OS events at futility analysis', ylab='Prob. of no futility stop for OS', 
+             main=paste0('True HR OS = ', hr_os, ', HR PFS = ', hr_pfs)) %>% print        
+    
+    barchart(I(P_go_PFS %>% as.character %>% as.numeric)~I(PFS_ev), data=tmp, groups=futi_threshold, 
+             scales=list(x=list(rot=45,cex=0.8)), auto.key=T, 
+             xlab='PFS events at futility analysis', ylab='Prob. of no futility stop for PFS', 
+             main=paste0('True HR OS = ', hr_os, ', HR PFS = ', hr_pfs)) %>% print  
+
+  } # end of for (hr_pfs in hrPFS)
+  
+} # end of for (hr_os in hrOS)
+
+## get results for green, blue and yellow scenario
+
+
+# out_summary_low <- out_summary_upp <- list()
+
+for (id0 in 1:length(futi_OS_ev)) {
+  
+  out_summary_low <- out_summary_upp <- matrix(NA, nrow=length(hrOS), ncol=length(futi_threshold)) 
+  
+  for (id in 1:length(futi_threshold)) {
+    
+    id_green <- which((settings$hrOS==0.75 | settings$hrPFS==0.70) & settings$futi_threshold==futi_threshold[id] & settings$futi_OS_ev==futi_OS_ev[id0])
+    id_blue  <- which(((settings$hrOS==0.80 & settings$hrPFS!=0.70) | 
+                      (settings$hrOS!=0.75 & settings$hrPFS==0.80)) & settings$futi_threshold==futi_threshold[id] & settings$futi_OS_ev==futi_OS_ev[id0])
+    id_yellow<- which((settings$hrOS==0.95 & settings$hrPFS==0.95) & settings$futi_threshold==futi_threshold[id] & settings$futi_OS_ev==futi_OS_ev[id0])    
+    out_green <- out[id_green,]
+    tmp_green <- c(pmax(out_green$P_go_OS %>% as.character %>% as.numeric, out_green$P_go_PFS %>% as.character %>% as.numeric),
+                   pmin(1, out_green$P_go_OS %>% as.character %>% as.numeric + out_green$P_go_PFS %>% as.character %>% as.numeric)
+                  )      
+  
+    
+    out_blue <- out[id_blue,]
+    tmp_blue <- c(pmax(out_blue$P_go_OS %>% as.character %>% as.numeric, out_blue$P_go_PFS %>% as.character %>% as.numeric),
+                   pmin(1, out_blue$P_go_OS %>% as.character %>% as.numeric + out_blue$P_go_PFS %>% as.character %>% as.numeric)
+                  )  
+    
+    out_yellow <- out[id_yellow,]
+    tmp_yellow <- c(pmax(out_yellow$P_go_OS %>% as.character %>% as.numeric, out_yellow$P_go_PFS %>% as.character %>% as.numeric),
+                   pmin(1, out_yellow$P_go_OS %>% as.character %>% as.numeric + out_yellow$P_go_PFS %>% as.character %>% as.numeric)
+                  )  
+    
+    
+    out_summary_low[1, id] <- min(tmp_green)
+    out_summary_upp[1, id] <- max(tmp_green)
+    
+    out_summary_low[2, id] <- min(tmp_blue)
+    out_summary_upp[2, id] <- max(tmp_blue)  
+    
+    out_summary_low[3, id] <- min(tmp_yellow)
+    out_summary_upp[3, id] <- max(tmp_yellow)    
+  } # end of for (id in 1:length(futi_threshold))
+  out_summary_low %>% kable(col.names = futi_threshold, caption=paste0('Lower bound for Prob of trial continuation, OS ev = ', futi_OS_ev[id0])) %>% print
+  out_summary_upp %>% kable(col.names = futi_threshold, caption=paste0('Upper bound for Prob of trial continuation, OS ev = ', futi_OS_ev[id0])) %>% print  
+} # end of for (id0 in 1:length(futi_OS_ev))
+
+
+```
+
